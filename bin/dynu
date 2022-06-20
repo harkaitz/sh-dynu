@@ -1,0 +1,137 @@
+#!/bin/sh -e
+#L:
+#L:  MIT License
+#L:  
+#l:  Bug reports, feature requests to gemini|https://harkadev.com/oss
+#l:  Copyright (c) 2022 Harkaitz Agirre, harkaitz.aguirre@gmail.com
+#L:
+#L:  Permission is hereby granted, free of charge, to any person obtaining
+#L:  a copy of this software and associated documentation files (the
+#L:  "Software"), to deal in the Software without restriction, including
+#L:  without limitation the rights to use, copy, modify, merge, publish,
+#L:  distribute, sublicense, and/or sell copies of the Software, and to
+#L:  permit persons to whom the Software is furnished to do so, subject to
+#L:  the following conditions:
+#L:
+#L:  The above copyright notice and this permission notice shall be
+#L:  included in all copies or substantial portions of the Software.
+#L:
+#L:  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+#L:  EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+#L:  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+#L:  NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+#L:  LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+#L:  OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+#L:  WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+##:
+#h: Usage: $0 ...
+#h:
+#h: Manage DNS bindings in `www.dynu.com`.
+#h:
+#h: ... show                       : Show configuration.
+#h: ... public-ip                  : Get public IP address.
+#h: ... domain-ls                  : List domains.
+#h: ... domain-id  DOMAIN          : Get domain's ID.
+#h: ... domain-set DOMAIN [IPADDR] : Assign IP address to domain.
+##:
+dynu() {
+    local cmd="$1"
+    shift
+    case "${cmd}" in
+        show)       dynu_show_variables                         ;;
+        public-ip)  dynu_public_ip                              ;;
+        domain-ls)  dynu_domain_ls  "$@" | column -s '	' -t    ;;
+        domain-id)  dynu_domain_id  "$@"                        ;;
+        domain-set) dynu_domain_set "$@"                        ;;
+        *)          error "Invalid argument: ${cmd}."; return 1 ;;
+    esac
+}
+dynu_show_variables() {
+    printf '%-25s : %s\n' DYNU_API_KEY "${DYNU_API_KEY}"
+}
+
+## -----------------------------------------------------------------------------
+dynu_curl_JSON() {
+    if test ! -n "${DYNU_API_KEY}"; then
+        error "Please set DYNU_API_KEY environment variable."
+        return 1
+    fi
+    JSON="`curl -s -H "accept: application/json" -H "API-Key: ${DYNU_API_KEY}" "$@"`"
+    if test ! -n "${JSON}"; then
+        return 1
+    fi
+    
+    
+}
+## -----------------------------------------------------------------------------
+dynu_public_ip() {
+    local ip="`dig +short myip.opendns.com @resolver1.opendns.com`"
+    if test -n "${ip}"; then
+        echo "${ip}"
+        return 0
+    else
+        error "Can't calculate public IP address."
+        return 1
+    fi
+}
+dynu_domain_ls() {
+    dynu_curl_JSON \
+        "https://api.dynu.com/v2/dns" \
+        -X GET
+    printf '%s\n' "${JSON}" \
+        | jq -r ".domains[] | [.id, .name, .ipv4Address] | @tsv"
+}
+dynu_domain_id() {
+    case "${1}" in
+        '') error "Please specify a domain."; return 1;;
+        *)  local d="${1}";;
+    esac
+    DYNU_LST="${DYNU_LST:-`dynu_domain_ls`}"
+    local id="`printf '%s\n' "${DYNU_LST}" | awk -v d="${d}" -F '	' '$2 == d {print $1}'`"
+    case "${id}" in
+        '') error "Domain ${d} not found."; return 1;;
+    esac
+}
+dynu_domain_set() {
+    local domain="$1" ipaddr="${2:-`dynu_public_ip`}"
+    if test ! -n "${ipaddr}"; then
+        error "Please specify an IP address."
+        return 1
+    fi
+
+    local id="`dynu_domain_id "${domain}"`"
+    test -n "${id}"
+    
+    dynu_curl_JSON                          \
+        "https://api.dynu.com/v2/dns/${id}" \
+        -X POST \
+        -d '{
+                "name"              : "'"${domain}"'",
+                "group"             : "",
+                "ipv4Address"       : "'"${ipaddr}"'",
+                "ipv6Address"       : null,
+                "ttl"               : 90,
+                "ipv4"              : true,
+                "ipv6"              : false,
+                "ipv4WildcardAlias" : true,
+                "ipv6WildcardAlias" : false,
+                "allowZoneTransfer" : false,
+                "dnssec"            : false
+            }'
+    echo "${JSON}"
+}
+## -----------------------------------------------------------------------------
+error() { echo "${SCRNAME}: $*" >&2; }
+SCRNAME="`basename "$0"`"
+if test @"${SCRNAME}" = @"dynu";then
+    case "${1}" in
+        ''|-h|--help)
+            sed -n 's/^ *#h: \{0,1\}//p' "$0" | sed "s|\\\$0|${SCRNAME}|g"
+            echo ""
+            sed -n 's/^ *#l: \{0,2\}//p' "$0"
+            ;;
+        *)
+            dynu "$@"
+            ;;
+    esac
+fi
